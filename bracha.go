@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"sync"
 )
 
@@ -22,7 +23,8 @@ type Party struct {
 	outputChannel chan string
 	isBad         bool
 	bracha        *Bracha
-	sendChannel   chan Message
+	isLocked      bool
+	content       string
 }
 
 type Bracha struct {
@@ -33,81 +35,93 @@ func NewBracha() *Bracha {
 	bracha := &Bracha{}
 	for i := 0; i < N; i++ {
 		node := &Party{
+			isBad:         false,
 			id:            i,
 			receivedEcho:  make(map[string]int),
 			receivedReady: make(map[string]int),
 			bracha:        bracha,
 			outputChannel: make(chan string),
-			sendChannel:   make(chan Message),
+			isLocked:      false,
+			content:       "",
 		}
 		bracha.parties = append(bracha.parties, node)
-		go node.StartListener()
-		go node.StartSender()
 	}
 	return bracha
 }
 
 func (p *Party) ReceiveMessage(m Message) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 
+	p.mu.Lock()
+	p.isLocked = true
+	var broadcastMessage *Message = nil
 	switch m.Type {
+	case "propose":
+		if p.isBad {
+			broadcastMessage = &Message{Type: "echo", Content: m.Content + fmt.Sprint(666)}
+		} else {
+			broadcastMessage = &Message{Type: "echo", Content: m.Content}
+		}
+
 	case "echo":
+
 		p.receivedEcho[m.Content]++
+		log.Printf("p%d receiveEcho[%s] = %d", p.id, m.Content, p.receivedEcho[m.Content])
 		if p.receivedEcho[m.Content] >= 2*f+1 && !p.sentReady {
 			p.sentReady = true
-			p.Send(Message{Type: "ready", Content: m.Content})
+			broadcastMessage = &Message{Type: "ready", Content: m.Content}
 		}
 
 	case "ready":
+
 		p.receivedReady[m.Content]++
+		//log.Printf("p%d receiveReady[%s] = %d", p.id, m.Content, p.receivedReady[m.Content])
 		if p.receivedReady[m.Content] >= 2*f+1 {
-			p.outputChannel <- m.Content
+			//fmt.Printf("p%d is %s\n", p.id, m.Content)
+			p.content = m.Content
 		}
 
 	}
-}
-
-func (p *Party) Send(m Message) {
-	p.sendChannel <- m
-}
-
-func (p *Party) StartSender() {
-	for {
-		select {
-		case <-p.sendChannel:
-			if p.isBad {
-				p.Broadcast(Message{Type: "echo", Content: "Hello" + fmt.Sprint(666)})
-			} else {
-				p.Broadcast(Message{Type: "echo", Content: "Hello"})
-			}
-		}
+	p.mu.Unlock()
+	p.isLocked = false
+	if broadcastMessage != nil {
+		p.Broadcast(*broadcastMessage, p.bracha)
 	}
+
 }
 
-func (p *Party) StartListener() {
-	for {
-		select {
-		case m := <-p.sendChannel:
-			p.ReceiveMessage(m)
-		}
-	}
-}
-
-func (p *Party) Broadcast(m Message) {
+func (p *Party) Broadcast(m Message, bracha *Bracha) {
 	for i := 0; i < N; i++ {
-		p.bracha.parties[i].Send(m)
+		if bracha.parties[i].isLocked {
+			bracha.parties[i].mu.Unlock()
+		}
+	}
+	for i := 0; i < N; i++ {
+		if p.isLocked {
+			p.mu.Unlock()
+		}
+		if bracha.parties[i].isLocked {
+			bracha.parties[i].mu.Unlock()
+		}
+		//log.Printf("p%d broadcast %s to p%d", p.id, m.Type, bracha.parties[i].id)
+		bracha.parties[i].ReceiveMessage(m)
+		//log.Printf("parties%d recive %s", bracha.parties[i].id, m.Type)
 	}
 }
+func (p *Party) Broadcast_start(m Message, bracha *Bracha) {
 
+}
 func main() {
 	brachaInstance := NewBracha()
 
+	// Set the first Party as a malicious node
 	brachaInstance.parties[2].isBad = true
 
-	brachaInstance.parties[0].Send(Message{Type: "propose", Content: "Hello"})
-
+	// Broadcast a proposal message from the first Party
+	brachaInstance.parties[0].Broadcast(Message{Type: "propose", Content: "Hello"}, brachaInstance)
 	for _, party := range brachaInstance.parties {
+		fmt.Printf("p[%d] is %s\n", party.id, party.content)
+	}
+	/*for _, party := range brachaInstance.parties {
 		select {
 		case output := <-party.outputChannel:
 			if party.isBad {
@@ -117,5 +131,5 @@ func main() {
 			}
 		default:
 		}
-	}
+	}*/
 }
